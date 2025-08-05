@@ -1,0 +1,293 @@
+library(dplyr)
+library(limma)
+library(tibble)
+library(readr)
+library(svglite)
+N <- 0  
+
+sim_smokers_heavy <- sim_smokers %>% filter(timepoint == N, smoking_category_duration == "Heavy","Moderate","Light")
+sim_quitters_heavy <- sim_quitters %>% filter(timepoint == N, smoking_category_duration == "Heavy","Moderate","Light")
+
+smokers_risk <- sim_smokers_heavy %>% select(id, risk_score) %>% rename(risk_smokers = risk_score)
+quitters_risk <- sim_quitters_heavy %>% select(id, risk_score) %>% rename(risk_quitters = risk_score)
+
+risk_compare <- left_join(quitters_risk, smokers_risk, by = "id") %>%
+  mutate(risk_increased = risk_quitters > risk_smokers)
+
+high_risk_quitter_ids <- risk_compare %>%
+  filter(risk_increased == TRUE) %>%
+  pull(id)
+
+data$id <- as.character(data$id)
+high_risk_quitter_ids <- as.character(high_risk_quitter_ids)
+
+data_filtered <- data %>%
+  filter(smoking_category_duration == "Heavy") %>%
+  filter(
+    (smoking_status == "Current" & id %in% high_risk_quitter_ids) |
+      (smoking_status == "Current")
+  ) %>%
+  mutate(group = case_when(
+    smoking_status == "Current" & id %in% high_risk_quitter_ids ~ "HighRiskQuitter",
+    smoking_status == "Current" ~ "Still_Smoking"
+  ))
+
+protein_start <- which(colnames(data) == "A1BG")
+protein_end   <- which(colnames(data) == "ZPR1")
+protein_expr <- data_filtered[, protein_start:protein_end]
+
+group_factor <- factor(data_filtered$group)
+design <- model.matrix(~0 + group_factor)
+colnames(design) <- levels(group_factor)
+
+expr_matrix <- t(as.matrix(protein_expr))
+fit <- lmFit(expr_matrix, design)
+contrast_matrix <- makeContrasts(HighRiskQuitter - Still_Smoking, levels = design)
+fit2 <- contrasts.fit(fit, contrast_matrix)
+fit2 <- eBayes(fit2)
+
+diff_result <- topTable(fit2, number = Inf, adjust.method = "BH") %>%
+  rownames_to_column(var = "Protein") %>%
+  arrange(desc(logFC))
+
+write.csv(diff_result, "HighRiskQuitters_vs_Smokers_Diff_Proteins.csv", row.names = FALSE)
+
+
+
+     risk_increased_count <- sum(risk_compare$risk_increased)
+     risk_decreased_count <- nrow(risk_compare) - risk_increased_count
+
+    
+     risk_data <- data.frame(
+       Category = c('Risk Increased', 'Risk Decreased'),
+       Count = c(risk_increased_count, risk_decreased_count)
+     )
+
+     ggplot(risk_data, aes(x = Category, y = Count, fill = Category)) +
+      geom_bar(stat = 'identity') +
+       labs(title = 'Comparison of Risk Score Changes for Smokers vs Quitters',
+            x = 'Risk Change', y = 'Count') +
+       scale_fill_manual(values = c('red', 'green')) +
+       theme_minimal()
+
+  library(ggplot2)
+library(dplyr)
+library(ggrepel)
+
+diff_result <- read.csv("HighRiskQuitters_vs_Smokers_Diff_Proteins.csv")
+
+diff_result <- diff_result %>%
+  mutate(
+    logP_raw = -log10(P.Value),
+    logP = ifelse(logP_raw > 300, 300, logP_raw),  
+    regulation = case_when(
+      adj.P.Val < 0.05 & logFC > 0.1 ~ "Upregulated",  
+      adj.P.Val < 0.05 & logFC < -0.1 ~ "Downregulated", 
+      TRUE ~ "Not Significant" 
+    )
+  )
+
+
+red_palette <- colorRampPalette(c("#990000", "#FF9999"))(100) 
+blue_palette <- colorRampPalette(c("#3182bd", "#deebf7"))(100) 
+
+
+diff_result_up <- diff_result %>%
+  filter(regulation == "Upregulated") %>%
+  arrange(P.Value) %>%
+  mutate(color = red_palette[as.numeric(cut(rank(P.Value), breaks = 100))])
+
+diff_result_down <- diff_result %>%
+  filter(regulation == "Downregulated") %>%
+  arrange(P.Value) %>%
+  mutate(color = blue_palette[as.numeric(cut(rank(P.Value), breaks = 100))])
+
+
+diff_result_nonsig <- diff_result %>%
+  filter(regulation == "Not Significant") %>%
+  mutate(color = "grey70")
+
+
+diff_result <- bind_rows(diff_result_up, diff_result_down, diff_result_nonsig)
+
+
+diff_result$regulation_factor <- factor(diff_result$regulation, levels = c("Upregulated", "Downregulated", "Not Significant"))
+filtered_genes <- c("LEP", "IGFBP1")
+
+label_df <- diff_result %>% filter(Protein %in% filtered_genes)
+
+
+p1 <- ggplot(diff_result, aes(x = logFC, y = logP)) +
+  geom_point(aes(color = regulation_factor, fill = color), size = 1.5, shape = 21, alpha = 0.9) +
+  scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue", "Not Significant" = "grey50")) +
+  scale_fill_identity() +
+  geom_vline(xintercept = c(-0.1, 0.1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "solid") +
+  geom_text_repel(
+    data = label_df,
+    aes(label = Protein),
+    size = 3.2,
+    max.overlaps = Inf, 
+    box.padding = 0.5,
+    point.padding = 0.3,
+    segment.color = "black", 
+    segment.size = 0.4,       
+    min.segment.length = 0   
+  ) +
+  labs(title = "Volcano Plot: HighRiskQuitters vs Smokers",
+       x = "log2 Fold Change",
+       y = "-log10 Adjusted P-value",
+       color = "Regulation") +
+  coord_cartesian(ylim = c(0, 20)) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.ticks = element_line(color = "black", linewidth = 0.3),
+    axis.ticks.length = unit(3, "pt")
+  )
+
+
+svg("HighRiskQuitters_vs_Smokers_Volcano_Plot.svg", width = 7, height = 7)
+plot(p1)
+dev.off()
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+library(tibble)
+library(readr)
+
+diff_result <- read.csv("HighRiskQuitters_vs_Smokers_Diff_Proteins.csv")
+
+up_genes <- diff_result %>%
+  filter(logFC > 0, adj.P.Val < 0.05) %>%
+  pull(Protein) %>%
+  unique()
+
+down_genes <- diff_result %>%
+  filter(logFC < 0, adj.P.Val < 0.05) %>%
+  pull(Protein) %>%
+  unique()
+
+background_df <- read.csv("background.csv", header = TRUE, stringsAsFactors = FALSE)
+background_symbols <- background_df$Gene
+background_entrez <- bitr(background_symbols,
+                          fromType = "SYMBOL",
+                          toType = "ENTREZID",
+                          OrgDb = org.Hs.eg.db)$ENTREZID
+
+up_entrez <- bitr(up_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)$ENTREZID
+down_entrez <- bitr(down_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)$ENTREZID
+
+  
+go_up <- enrichGO(gene = up_entrez,
+                  OrgDb = org.Hs.eg.db,
+                  universe = background_entrez,
+                  keyType = "ENTREZID",
+                  ont = "BP",
+                  pAdjustMethod = "BH",
+                  pvalueCutoff = 0.05,
+                  readable = TRUE)
+
+go_down <- enrichGO(gene = down_entrez,
+                    OrgDb = org.Hs.eg.db,
+                    universe = background_entrez,
+                    keyType = "ENTREZID",
+                    ont = "BP",
+                    pAdjustMethod = "BH",
+                    pvalueCutoff = 0.05,
+                    readable = TRUE)
+
+
+kegg_up <- enrichKEGG(gene = up_entrez, organism = "hsa",universe = background_entrez, pvalueCutoff = 0.05)
+
+
+kegg_down <- enrichKEGG(gene = down_entrez, organism = "hsa",universe = background_entrez, pvalueCutoff = 0.05)
+
+write.csv(go_up@result, "GO_Upregulated.csv", row.names = FALSE)
+write.csv(go_down@result, "GO_Downregulated.csv", row.names = FALSE)
+write.csv(kegg_up@result, "KEGG_Upregulated.csv", row.names = FALSE)
+write.csv(kegg_down@result, "KEGG_Downregulated.csv", row.names = FALSE)
+
+  bmi_data <- data %>%
+  filter(smoking_category_duration == "Heavy") %>%
+  filter(
+    (smoking_status == "Current" & id %in% high_risk_quitter_ids) |
+      (smoking_status == "Current")
+  ) %>%
+  mutate(group = case_when(
+    smoking_status == "Current" & id %in% high_risk_quitter_ids ~ "HighRiskQuitter",
+    smoking_status == "Current" ~ "Still_Smoking"
+  )) %>%
+  select(id, group, BMI.x)
+
+
+library(ggplot2)
+
+ggplot(bmi_data, aes(x = group, y = BMI.x, fill = group)) +
+  geom_violin(trim = FALSE, alpha = 0.6, width = 1.2, color = NA) +   
+  geom_boxplot(width = 0.15, outlier.shape = NA, color = "black", alpha = 0.9) +  
+  labs(
+    title = "",
+    x = "",
+    y = "BMI"
+  ) +
+  scale_fill_manual(values = c("HighRiskQuitter" = "#E64B35", "Still_Smoking" = "#4DBBD5")) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+wilcox.test(BMI.x ~ group, data = bmi_data)
+ggsave("BMI_violin.svg", width = 6, height = 5, device = "svg")
+
+  library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+N <- 4 
+
+
+sim_smokers_heavy <- sim_smokers %>% 
+  filter(timepoint == N, smoking_category_duration %in% c("Heavy", "Moderate", "Light")) %>%
+  mutate(group = smoking_category_duration) 
+
+sim_quitters_heavy <- sim_quitters %>% 
+  filter(timepoint == N, smoking_category_duration %in% c("Heavy", "Moderate", "Light")) %>%
+  mutate(group = smoking_category_duration)  
+
+
+smokers_risk <- sim_smokers_heavy %>% select(id, risk_score, group) %>% rename(risk_smokers = risk_score)
+quitters_risk <- sim_quitters_heavy %>% select(id, risk_score, group) %>% rename(risk_quitters = risk_score)
+
+
+risk_compare <- left_join(quitters_risk, smokers_risk, by = c("id", "group")) %>%
+  mutate(risk_increased = risk_quitters > risk_smokers)
+
+
+group_risk <- risk_compare %>%
+  filter(group %in% c("Heavy", "Moderate", "Light")) %>%
+  group_by(group) %>%
+  summarise(
+    risk_increased_count = sum(risk_increased, na.rm = TRUE),
+    risk_decreased_count = sum(!risk_increased, na.rm = TRUE)
+  ) %>%
+  gather(key = "risk_change", value = "count", risk_increased_count, risk_decreased_count) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+
+ggplot(group_risk, aes(x = "", y = percentage, fill = interaction(group, risk_change))) +
+  geom_bar(stat = 'identity', width = 1) +  
+  coord_polar(theta = 'y') +  
+  labs(title = 'Proportion of Risk Change by Smoking Group (Heavy, Moderate, Light)') + 
+  scale_fill_manual(values = c("Heavy.risk_increased_count" = "#E64B35", 
+                               "Heavy.risk_decreased_count" = "#F39C12",
+                               "Moderate.risk_increased_count" = "#4DBBD5", 
+                               "Moderate.risk_decreased_count" = "#2ECC71", 
+                               "Light.risk_increased_count" = "#9B59B6", 
+                               "Light.risk_decreased_count" = "#3498DB")) +
+  theme_void() + 
+  theme(legend.title = element_blank()) + 
+  geom_text(aes(label = paste(count)), position = position_stack(vjust = 0.5))
