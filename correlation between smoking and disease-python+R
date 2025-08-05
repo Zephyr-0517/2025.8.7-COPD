@@ -1,0 +1,158 @@
+import pandas as pd
+import numpy as np
+from scipy.stats import chi2_contingency
+from statsmodels.stats.multitest import multipletests
+import matplotlib.pyplot as plt
+import re
+
+
+pd.set_option('display.max_columns', 50)
+pd.set_option('display.width', 1000)
+pd.set_option('display.float_format', '{:.4e}'.format)  
+
+
+merged_data = pd.read_csv(r"C:\Users\Ma\Desktop\smoke&COPD\relation_data.csv", index_col=0)
+merged_data = merged_data[merged_data['smoking_status'].isin(['Never', 'Current'])]
+merged_data['smoking_status'] = merged_data['smoking_status'].astype('category')
+
+disease_columns = [col for col in merged_data.columns if col not in ['id', 'smoking_status']]
+
+exclude_prefixes = ['F','O','P','Q','R','S','T','U','V','W','X','Y','Z'] 
+filtered_diseases = [d for d in disease_columns 
+                     if not any(d.startswith(p) for p in exclude_prefixes)]
+
+selected_diseases = filtered_diseases
+
+results = []
+
+for i, disease in enumerate(selected_diseases, 1):
+    if i % 100 == 0:  
+        print(f"  {i}...")
+    
+    
+    contingency_table = pd.crosstab(merged_data[disease], merged_data['smoking_status'])
+    
+
+    if contingency_table.shape != (2, 2):
+        continue
+    
+   
+    chi2, p, dof, expected = chi2_contingency(contingency_table)
+    p = max(p, np.finfo(float).tiny)
+    
+   
+    n = contingency_table.sum().sum()
+    cramers_v = np.sqrt(chi2 / (n * (min(contingency_table.shape) - 1)))
+    
+
+    group_counts = merged_data.groupby('smoking_status')[disease].value_counts(normalize=True)
+    
+   
+    proportions = {
+        'Never': group_counts.get(('Never', True), 0),
+        'Current': group_counts.get(('Current', True), 0)
+    }
+    
+
+    base_risk = proportions['Never']
+    rr_current = proportions['Current'] / base_risk if base_risk > 0 else np.nan
+    
+
+    results.append({
+        'disease_code': disease,
+        'chi2': chi2,
+        'p_value': p,
+        'dof': dof,
+        'cramers_v': cramers_v,
+        'proportion_never': proportions['Never'],
+        'proportion_current': proportions['Current'],
+        'rr_current_vs_never': rr_current
+    })
+
+
+results_df = pd.DataFrame(results)
+
+p_values = results_df['p_value'].clip(lower=np.finfo(float).tiny) 
+
+
+rejected_fdr, p_fdr, _, _ = multipletests(p_values, method='fdr_bh')
+
+rejected_bonf, p_bonf, _, _ = multipletests(p_values, method='bonferroni')
+
+results_df['p_value_fdr'] = p_fdr
+results_df['p_value_bonferroni'] = p_bonf
+results_df['significant_fdr'] = rejected_fdr
+results_df['significant_bonferroni'] = rejected_bonf
+
+results_df['neg_log10_p'] = -np.log10(results_df['p_value'])
+results_df['neg_log10_p_fdr'] = -np.log10(results_df['p_value_fdr'])
+results_df['neg_log10_p_bonf'] = -np.log10(results_df['p_value_bonferroni'])
+
+output_path = r"C:\Users\Ma\Desktop\smoke&COPD\final_results_filtered.csv"
+results_df.to_csv(output_path, index=False)
+
+
+plt.figure(figsize=(12, 6))
+plt.subplot(1, 2, 1)
+plt.hist(results_df['neg_log10_p'], bins=50, color='skyblue')
+plt.title('Distribution of -log10(p) (Filtered Diseases)')
+plt.xlabel('-log10(p-value)')
+plt.ylabel('Count')
+
+plt.subplot(1, 2, 2)
+plt.scatter(results_df['cramers_v'], results_df['neg_log10_p'], alpha=0.5)
+plt.title('Effect Size vs Significance (Filtered)')
+plt.xlabel("Cramer's V")
+plt.ylabel('-log10(p-value)')
+plt.tight_layout()
+plt.savefig(r"C:\Users\Ma\Desktop\smoke&COPD\results_visualization_filtered.png")
+#===========================================================
+  library(ggplot2)
+library(dplyr)
+library(readr)
+library(stringr)
+
+df <- read_csv("final_results_with_correction.csv")
+
+df_filtered <- df %>%
+  filter(!str_detect(disease_code, "^[F,O-Z]"))
+
+df_filtered <- df_filtered %>%
+  mutate(
+    disease_prefix = str_sub(disease_code, 1, 1),
+    color_group = case_when(
+      disease_prefix == "J" ~ "green",
+      disease_prefix == "K" ~ "blue",
+      disease_prefix == "C" ~ "yellow",
+      disease_prefix == "I" ~ "red",
+      TRUE ~ "gray"  
+    )
+  )
+
+library(ggplot2)
+library(dplyr)
+
+df_filtered_significant <- df_filtered %>% 
+  filter(neg_log10_p_bonf > -log10(0.05))  
+
+df_filtered_significant <- df_filtered_significant %>%
+  mutate(label = ifelse(disease_code %in% c("C34", "J43", "J44"), disease_code, ""))
+
+ggplot(df_filtered_significant, aes(x = cramers_v, y = rr_current_vs_never)) +
+  geom_point(aes(color = color_group), size = 3, alpha = 0.8) +
+
+  geom_text(
+    aes(label = label), 
+    hjust = -0.2, vjust = 0.5, 
+    size = 4, color = "black", fontface = "bold"
+  ) +
+  scale_color_identity() +
+  labs(
+    title = "Disease Associations: Effect Size vs. Risk Ratio (Significant Only)",
+    x = "Cramér's V (Effect Size)",
+    y = "Risk Ratio (RR)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
