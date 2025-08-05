@@ -1,0 +1,284 @@
+
+library(uwot)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(survival)
+library(svglite)
+
+
+my_colors <- c(
+  "1" = "#EFA397",  
+  "2" = "#3376A8",  
+  "3" = "#F4F6B3",  
+  "4" = "#8CC8BD",
+  "5" = "#FFAA00",
+  "6" = "#7F4CA5"
+)
+
+
+tg_genes <- read.csv("lassomin.csv", header = TRUE)
+target_proteins <- tg_genes[[1]]
+target_proteins <- c("ALPP", "CXCL17", "WFDC2", "MMP12", "GDF15",
+                     "SCGB1A1", "TNR", "BCAN", "REN", "EGFR", "AGER")
+
+
+data <- read.csv("Final_Merged_Data.csv", header = TRUE, stringsAsFactors = FALSE)
+data <- data %>%
+  filter(baseline_J44 == "No", baseline_J43 == "No", baseline_C34 == "No")
+
+smoker_data <- data %>%
+  filter(smoking_category_duration %in% c("Heavy")) %>%
+  filter(smoking_status %in% c("Current")) 
+
+
+protein_data <- smoker_data %>%
+  dplyr::select(all_of(c("id", target_proteins))) %>%
+  mutate(across(-id, as.numeric))
+
+rownames(protein_data) <- protein_data$id
+protein_data <- protein_data[, -1]
+
+
+metadata <- smoker_data %>% dplyr::select(id, Recruitment_Age, smoking_duration)
+metadata <- metadata[match(rownames(protein_data), metadata$id), ]
+
+joint_data <- cbind(protein_data, metadata)
+joint_data <- joint_data[complete.cases(joint_data), ]
+protein_data <- joint_data[, colnames(protein_data)]
+metadata <- joint_data[, colnames(metadata)]
+
+resid_mat <- matrix(nrow = nrow(protein_data), ncol = ncol(protein_data))
+colnames(resid_mat) <- colnames(protein_data)
+
+for (i in seq_len(ncol(protein_data))) {
+  df <- data.frame(y = protein_data[, i],
+                   age = metadata$Recruitment_Age,
+                   smoke = metadata$smoking_duration)
+  model <- lm(y ~ age + smoke, data = df)
+  resid_mat[, i] <- residuals(model)
+}
+
+pca_result <- prcomp(resid_mat, center = TRUE, scale. = FALSE)
+cum_var <- summary(pca_result)$importance[3,]
+plot(cum_var, type="l", xlab="Number of PCs", ylab="Cumulative Variance Explained")
+which(cum_var >= 0.9)[1]  
+pca_matrix <- pca_result$x[, 1:4]
+
+
+set.seed(123)
+umap_result <- umap(
+  pca_matrix,
+  n_neighbors = 30,
+  min_dist = 0.1,
+  metric = "euclidean",
+  n_threads = 16,
+  verbose = TRUE
+)
+
+umap_df <- data.frame(
+  id = rownames(protein_data),
+  UMAP1 = umap_result[, 1],
+  UMAP2 = umap_result[, 2]
+)
+
+
+library(cluster)
+set.seed(123)
+gap_stat <- clusGap(pca_matrix, FUN = kmeans, K.max = 10, B = 50)
+plot(gap_stat, main = "")
+
+set.seed(123)
+k_result <- kmeans(umap_df[, c("UMAP1", "UMAP2")], centers = 2, nstart = 25)
+umap_df$Cluster <- factor(k_result$cluster)
+
+
+p1 <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Cluster)) +
+  geom_point(alpha = 0.8, size = 2) +
+  scale_color_manual(values = my_colors) +
+  labs(title = "UMAP of Residualized Proteins (Current Smokers Only)",
+       x = "UMAP1", y = "UMAP2") +
+  theme_minimal(base_size = 14) +
+  theme(panel.grid = element_blank())
+
+plot(p1)
+
+
+cluster_counts <- table(umap_df$Cluster)
+print(cluster_counts)
+
+ggsave("umap_clusters_smokers_resid.svg", p1, width = 7, height = 5)
+ggsave("umap_clusters_smokers_resid.png", plot = p1, width = 8, height = 6, dpi = 300)
+
+
+
+umap_df <- umap_df %>%
+  left_join(data %>% mutate(id = as.character(id)) %>%
+              dplyr::select(id, smoking_duration), by = "id") %>%
+  mutate(smoking_duration = ifelse(is.na(smoking_duration), 0, smoking_duration))
+
+p2 <- ggplot(umap_df,
+             aes(x = Cluster, y = smoking_duration, fill = Cluster)) +
+  geom_violin(trim = FALSE, scale = "width", alpha = 0.7) +  # 半透明小提琴
+  geom_boxplot(width = 0.15, outlier.size = 0.8, color = "black", fill = "white") +
+  scale_fill_manual(values = my_colors) +
+  labs(
+    title = "Smoking Duration Across Clusters (NA → 0)",
+    x = "Cluster",
+    y = "Smoking Duration (Years)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black")
+  )
+plot(p2)
+
+ggsave("violin_smoking_duration.svg", p2, width = 7, height = 5)
+
+umap_df <- umap_df %>%
+  left_join(data %>% mutate(id = as.character(id)) %>%
+              dplyr::select(id, event_J44, followup_time_J44), by = "id")
+
+plot_umap_highlight <- function(df, max_years, color = "red") {
+  df <- df %>%
+    mutate(highlight = ifelse(event_J44 == 1 & followup_time_J44 <= max_years * 365, "yes", "no"))
+  
+  ggplot(df, aes(x = UMAP1, y = UMAP2)) +
+    geom_point(data = subset(df, highlight == "no"), color = "grey80", alpha = 0.5, size = 1.5) +
+    geom_point(data = subset(df, highlight == "yes"), color = color, alpha = 0.9, size = 1.8) +
+    labs(title = paste0("COPD Events ≤ ", max_years, " Years Highlighted"),
+         subtitle = paste0("Red = COPD onset within ", max_years, " years"),
+         x = "UMAP1", y = "UMAP2") +
+    theme_minimal(base_size = 14) +
+    theme(panel.grid = element_blank())
+}
+
+plot5 <- plot_umap_highlight(umap_df, max_years = 5)
+plot10 <- plot_umap_highlight(umap_df, max_years = 10)
+plot15 <- plot_umap_highlight(umap_df, max_years = 15)
+
+print(plot5)
+print(plot10)
+print(plot15)
+
+n_5yr <- umap_df %>%
+  filter(event_J44 == 1, followup_time_J44 <= 5 * 365) %>%
+  nrow()
+
+n_10yr <- umap_df %>%
+  filter(event_J44 == 1, followup_time_J44 <= 10 * 365) %>%
+  nrow()
+
+n_15yr <- umap_df %>%
+  filter(event_J44 == 1, followup_time_J44 <= 15 * 365) %>%
+  nrow()
+
+
+
+ggsave("umap_COPD_5yr.svg", plot5, width = 7, height = 5)
+ggsave("umap_COPD_10yr.svg", plot10, width = 7, height = 5)
+ggsave("umap_COPD_15yr.svg", plot15, width = 7, height = 5)
+ggsave("umap_COPD_5yr.png", plot = plot5, width = 8, height = 6, dpi = 300)
+ggsave("umap_COPD_10yr.png", plot = plot10, width = 8, height = 6, dpi = 300)
+ggsave("umap_COPD_15yr.png", plot = plot15, width = 8, height = 6, dpi = 300)
+
+
+incidence_data <- umap_df %>%
+  filter(!is.na(followup_time_J44), !is.na(event_J44)) %>%
+  mutate(time_years = followup_time_J44 / 365,
+         Cluster = factor(Cluster))
+
+fit <- survfit(Surv(time_years, event_J44) ~ Cluster, data = incidence_data)
+
+
+surv_df <- data.frame(
+  time = fit$time,
+  cum_incidence = 1 - fit$surv,
+  Cluster = rep(gsub("^.*=", "", names(fit$strata)), fit$strata)
+)
+
+p4 <- ggplot(surv_df, aes(x = time, y = cum_incidence, color = Cluster)) +
+  geom_step(size = 1.2) +
+  scale_color_manual(values = my_colors) +
+  labs(
+    title = "Cumulative Incidence of COPD by Cluster",
+    x = "Follow-up Time (Years)",
+    y = "Cumulative Incidence (1 - Survival)",
+    color = "Cluster"
+  ) +
+  theme_minimal(base_size = 14)
+  plot(p4)
+ggsave("km_copd_incidence.svg", p4, width = 7, height = 5)
+
+
+
+# ==== 加入年龄数据，NA填充为0 ====
+umap_df <- umap_df %>%
+  left_join(data %>% mutate(id = as.character(id)) %>%
+              dplyr::select(id, Recruitment_Age), by = "id") %>%
+  mutate(age = ifelse(is.na(Recruitment_Age), 0,Recruitment_Age))
+
+# ==== 绘制年龄小提琴图 ====
+p_age <- ggplot(umap_df,
+                aes(x = Cluster, y = age, fill = Cluster)) +
+  geom_violin(trim = FALSE, scale = "width", alpha = 0.7) +
+  geom_boxplot(width = 0.15, outlier.size = 0.8, color = "black", fill = "white") +
+  scale_fill_manual(values = my_colors) +
+  labs(
+    title = "Age Distribution Across Clusters (NA → 0)",
+    x = "Cluster",
+    y = "Age (Years)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black")
+  )
+
+plot(p_age)
+ggsave("violin_age_clusters.svg", p_age, width = 7, height = 5)
+
+library(limma)
+library(dplyr)
+
+protein_data <- data %>%
+  dplyr::select(id, A1BG:ZPR1)
+
+protein_data <- protein_data %>%
+  mutate(id = as.character(id)) %>%  # 强制id为字符型
+  inner_join(umap_df %>% mutate(id = as.character(id)) %>%
+             dplyr::select(id, Cluster), by = "id") %>%
+  filter(!is.na(Cluster))
+
+sub_data <- protein_data %>%
+  filter(Cluster %in% c("1", "2")) %>%
+  mutate(Cluster = factor(Cluster, levels = c("1", "2"),
+                          labels = c("C1", "C2")))
+
+design <- model.matrix(~ 0 + Cluster, data = sub_data)
+colnames(design) <- c("C1", "C2")
+
+expr <- t(as.matrix(sub_data %>% dplyr::select(-id, -Cluster)))
+
+fit <- lmFit(expr, design)
+contrast.matrix <- makeContrasts(C1 - C2, levels = design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+
+res <- topTable(fit2, adjust.method = "BH", number = Inf) %>%
+  arrange(desc(logFC))  
+
+
+write.csv(res, "limma_CompleteProtein_Cluster1_vs_Cluster2.csv", row.names = TRUE)
+res_up <- res %>% 
+  filter(logFC > 0 & adj.P.Val < 0.05)
+res_down <- res %>% 
+  filter(logFC < 0 & adj.P.Val < 0.05)
+
+write.csv(res_up, "limmaup.csv", row.names = TRUE)
+write.csv(res_down, "limmadown.csv", row.names = TRUE)
