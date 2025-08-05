@@ -1,0 +1,120 @@
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+
+merged_all <- read.csv("Final_Merged_Data.csv", header = TRUE, stringsAsFactors = FALSE)
+
+plot_data <- merged_all %>%
+  filter(smoking_status == "Current" |
+           (smoking_status == "Previous" & years_since_quit < 1)) %>%
+  mutate(
+    group = case_when(
+      smoking_status == "Current" ~ "Still_Smoking",
+      smoking_status == "Previous" & years_since_quit < 1 ~ "Quit_<1y"
+    )
+  ) %>%
+  filter(smoking_category_duration %in% c("Light", "Moderate", "Heavy"))
+
+plot_data$smoking_category_duration <- factor(
+  plot_data$smoking_category_duration,
+  levels = c("Light", "Moderate", "Heavy")
+)
+plot_data$group <- factor(plot_data$group, levels = c("Still_Smoking", "Quit_<1y"))
+
+light_y_range <- plot_data %>%
+  filter(smoking_category_duration == "Light") %>%
+  summarise(min_BMI.x = min(BMI.x, na.rm = TRUE), max_BMI.x = max(BMI.x, na.rm = TRUE))
+
+p <- ggplot(plot_data, aes(x = group, y = BMI.x, fill = group)) +
+  geom_violin(trim = FALSE, alpha = 0.6, width = 1.2, color = NA) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, color = "black", alpha = 0.9, show.legend = FALSE) +
+
+  stat_compare_means(
+    method = "wilcox.test", 
+    label = "p.format",     
+    label.y.npc = "top",   
+    size = 4
+  ) +
+  
+  stat_summary(
+    fun = function(x) length(x),
+    geom = "text",
+    aes(label = paste0("n = ", ..y..)),
+    fun.y = length,
+    vjust = -1.5,
+    size = 3.5
+  ) +
+
+  facet_wrap(~ smoking_category_duration, scales = "fixed") +  
+  scale_fill_manual(values = c("Still_Smoking" = "#4DBBD5", "Quit_<1y" = "#E64B35")) +
+  labs(
+    title = "BMI.x Comparison: <1y Quitters vs Current Smokers by Smoking Intensity",
+    x = NULL,
+    y = "BMI.x"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  coord_cartesian(ylim = c(light_y_range$min_BMI.x, light_y_range$max_BMI.x)) 
+
+age_plot_data <- merged_all %>%
+  filter(smoking_category_duration == "Heavy") %>% 
+  filter(smoking_status == "Current" | 
+         (smoking_status == "Previous" & years_since_quit < 1)) %>%
+  mutate(
+    group = case_when(
+      smoking_status == "Current" ~ "Still_Smoking",
+      smoking_status == "Previous" & years_since_quit < 1 ~ "Quit_<1y"
+    )
+  )
+
+
+age_plot_data$group <- factor(age_plot_data$group, 
+                             levels = c("Still_Smoking", "Quit_<1y"))
+
+
+age_plot <- ggplot(age_plot_data, aes(x = group, y = Recruitment_Age, fill = group)) +
+  geom_violin(trim = FALSE, alpha = 0.6, width = 1.2, color = NA) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, color = "black", alpha = 0.9) +
+  
+
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    label.y = 95,  
+    size = 4
+  ) +
+  
+ 
+  stat_summary(
+    fun = function(x) length(x),
+    geom = "text",
+    aes(label = paste0("n = ", ..y..)),
+    fun.y = length,
+    vjust = -1.5,
+    size = 3.5,
+    position = position_nudge(y = 5) 
+  ) +
+  
+
+  scale_fill_manual(values = c("Still_Smoking" = "#4DBBD5", "Quit_<1y" = "#E64B35")) +
+  labs(
+    title = "Age Comparison in Heavy Smokers: <1y Quitters vs Current Smokers",
+    subtitle = "Y-axis limited to 0-100 years",
+    x = NULL,
+    y = "Age at Recruitment (years)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  coord_cartesian(ylim = c(35, 75)) 
+
+print(age_plot)
