@@ -1,0 +1,78 @@
+library(dplyr)
+library(readr)
+
+data <- read.csv("Final_Merged_Data.csv", header = TRUE, stringsAsFactors = FALSE)
+
+data <- data %>%
+  filter(baseline_C34 == "No", baseline_J43 == "No",baseline_J44=="No")
+
+data <- data %>%
+  filter(smoking_category_duration %in% c("Never",  "Heavy"),
+         quit_category %in% c("Never", "Current", "Former <10y", "Former ≥10y"))
+
+data <- data %>%
+  mutate(
+    group = case_when(
+      smoking_category_duration == "Never" ~ "Never",
+      quit_category == "Current" ~ "Current",
+      quit_category == "Former <10y" ~ "Quit <10y",
+      quit_category == "Former ≥10y" ~ "Quit ≥10y",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(group))
+
+target_genes <- read.csv("background.csv", row.names = 1) %>% rownames()
+
+rownames(data) <- data$id
+protein_start <- which(colnames(data) == "A1BG")
+protein_end   <- which(colnames(data) == "ZPR1")
+protein_data <- data[, protein_start:protein_end]
+
+protein_data$group <- data$group
+protein_data <- protein_data %>%
+  dplyr::select(all_of(target_genes), group) %>%
+  filter(!is.na(group))
+
+mean_expr_by_group <- protein_data %>%
+  group_by(group) %>%
+  summarise(across(everything(), ~mean(.x, na.rm = TRUE)), .groups = "drop")
+
+mean_expr_matrix <- as.data.frame(t(mean_expr_by_group[,-1]))
+colnames(mean_expr_matrix) <- mean_expr_by_group$group
+mean_expr_matrix$Gene <- rownames(mean_expr_matrix)
+mean_expr_matrix <- mean_expr_matrix[, c("Gene", sort(colnames(mean_expr_matrix)[-ncol(mean_expr_matrix)]))]
+
+write.csv(mean_expr_matrix, "fig5.csv", row.names = FALSE)
+
+library(dplyr)
+library(readr)
+library(tibble)
+
+data_all <- read.csv("Final_Merged_Data.csv", header = TRUE, stringsAsFactors = FALSE)
+
+data_all <- data_all %>%
+  mutate(group = paste(quit_category, baseline_J44, sep = "_"))
+
+smoke_genes <- read.csv("lassomin.csv", header = TRUE, stringsAsFactors = FALSE)
+target_genes <- smoke_genes[[1]] 
+
+protein_cols <- intersect(target_genes, colnames(data_all))
+
+expr_data <- data_all[, c("group", protein_cols)]
+
+mean_matrix <- expr_data %>%
+  group_by(group) %>%
+  summarise(across(everything(), ~ mean(.x, na.rm = TRUE))) %>%
+  column_to_rownames("group") %>%
+  t() 
+
+desired_order <- c(
+  "Current_Yes", "Former <10y_Yes", "Former ≥10y_Yes", "Never_Yes",
+  "Current_No", "Former <10y_No", "Former ≥10y_No", "Never_No"
+)
+
+existing_order <- desired_order[desired_order %in% colnames(mean_matrix)]
+mean_matrix <- mean_matrix[, existing_order]
+
+write.csv(mean_matrix, "fig3.csv")
