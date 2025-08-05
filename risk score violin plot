@@ -1,0 +1,62 @@
+
+library(survival)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(randomForest)
+library(progressr)
+library(svglite)
+
+data_all <- read.csv("Final_Merged_Data.csv", header = TRUE, stringsAsFactors = FALSE)
+
+
+data_clean <- data_all %>%
+  filter(baseline_J44 == "No", baseline_J43 == "No", baseline_C34 == "No",
+         followup_time_J44 > 0,smoking_status != "Previous") %>%
+  drop_na(BMI.x, TDI)
+
+data_clean$smoking_category_duration <- relevel(factor(data_clean$smoking_category_duration), ref = "Light")
+
+cox_model <- coxph(Surv(followup_time_J44, event_J44) ~ Recruitment_Age + BMI.x + sex +
+                     TDI + ALPP + CXCL17 + WFDC2 + MMP12 + GDF15 + TNR + BCAN + SCGB1A1 + REN + EGFR + AGER,
+                   data = data_clean)
+
+
+data_clean$risk_score <- predict(cox_model, newdata = data_clean, type = "lp")
+
+data_clean$smoking_category_duration <- factor(data_clean$smoking_category_duration,
+                                              levels = c("Never", "Light", "Moderate", "Heavy"))
+
+smoking_colors <- c("Never" = "green", "Light" = "blue", 
+                    "Moderate" = "yellow", "Heavy" = "red")
+ggplot(data_clean, aes(x = smoking_category_duration, y = risk_score, fill = smoking_category_duration)) +
+  geom_violin(trim = FALSE, alpha = 0.7) + 
+  geom_boxplot(width = 0.1, fill = "white", alpha = 0.7, outlier.shape = NA) +
+  scale_fill_manual(values = smoking_colors, name = "Smoking Category") +
+  labs(x = "Smoking Category", 
+       y = "Risk Score (Linear Predictor)",
+       title = "Distribution of COPD Risk Score by Smoking Category") +
+  theme_minimal() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, hjust = 1))  
+
+library(pROC)
+
+roc_obj <- roc(data_clean$event_J44, data_clean$risk_score)
+
+best_cutoff <- coords(roc_obj, "best", ret = "threshold")$threshold
+
+ggplot(data_clean, aes(x = smoking_category_duration, y = risk_score, fill = smoking_category_duration)) +
+  geom_violin(trim = FALSE, alpha = 0.7) +
+  geom_boxplot(width = 0.1, fill = "white", alpha = 0.7, outlier.shape = NA) +
+  geom_hline(yintercept = best_cutoff, linetype = "dashed", color = "red", linewidth = 1) +
+  annotate("text", x = 0.5, y = best_cutoff + 0.1, 
+           label = paste("Optimal Cut-off =", round(best_cutoff, 2)), hjust = 0, color = "red") +
+  scale_fill_manual(values = smoking_colors) +
+  labs(x = "Smoking Category", 
+       y = "Risk Score",
+       title = "COPD Risk Score Distribution with Optimal Cut-off",
+       subtitle = "Red dashed line indicates ROC-optimized cut-off for predicting COPD") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
