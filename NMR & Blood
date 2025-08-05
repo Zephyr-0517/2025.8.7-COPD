@@ -1,3 +1,85 @@
+
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+
+
+data_with_blood <- read.csv("data_with_blood.csv", header = TRUE, stringsAsFactors = FALSE)
+
+blood_check_cols <- grep("NMR|Blood", colnames(data_with_blood), value = TRUE)
+
+data_blood_check <- data_with_blood %>%
+  select(id, smoking_category_duration, smoking_status, years_since_quit, all_of(blood_check_cols)) %>%
+  filter(!is.na(smoking_status))  
+
+data_blood_check_grouped <- data_blood_check %>%
+  mutate(group = case_when(
+    smoking_category_duration == "Moderate" & smoking_status == "Previous" & years_since_quit <= 3 ~ "Quit_3y_or_less",  
+    smoking_category_duration == "Moderate" & smoking_status == "Current" ~ "Still_Smoking",  
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(group)) 
+
+calculate_p_value <- function(column_name) {
+
+  shapiro_test_quit <- shapiro.test(data_blood_check_grouped[[column_name]][data_blood_check_grouped$group == "Quit_3y_or_less"])
+  shapiro_test_smoking <- shapiro.test(data_blood_check_grouped[[column_name]][data_blood_check_grouped$group == "Still_Smoking"])
+
+  if (shapiro_test_quit$p.value > 0.05 & shapiro_test_smoking$p.value > 0.05) {
+
+    p_value <- t.test(as.formula(paste(column_name, "~ group")), data = data_blood_check_grouped)$p.value
+  } else {
+
+    p_value <- wilcox.test(as.formula(paste(column_name, "~ group")), data = data_blood_check_grouped)$p.value
+  }
+  
+  return(p_value)
+}
+
+p_values <- sapply(blood_check_cols, calculate_p_value)
+
+p_values_df <- data.frame(
+  Blood_Check = blood_check_cols,
+  P_Value = p_values
+)
+
+significant_results <- p_values_df %>%
+  filter(P_Value < 0.05) 
+
+write.csv(significant_results, "significant_blood_checks_Moderate.csv", row.names = FALSE)
+
+library(dplyr)
+library(tidyr)
+library(readr)
+
+signif_vars <- significant_results$Blood_Check
+
+summary_stats <- data_blood_check_grouped %>%
+  select(group, all_of(signif_vars)) %>%
+  pivot_longer(cols = -group, names_to = "Biomarker", values_to = "Value") %>%
+  group_by(Biomarker, group) %>%
+  summarise(
+    Mean = mean(Value, na.rm = TRUE),
+    Median = median(Value, na.rm = TRUE),
+    SD = sd(Value, na.rm = TRUE),
+    N = sum(!is.na(Value)),
+    .groups = "drop"
+  )
+
+summary_wide <- summary_stats %>%
+  pivot_wider(
+    names_from = group,
+    values_from = c(Mean, Median, SD, N),
+    names_sep = "_"
+  )
+
+summary_with_p <- summary_wide %>%
+  left_join(significant_results, by = c("Biomarker" = "Blood_Check"))
+
+print(head(summary_with_p, 10))
+
+write_csv(summary_with_p, "significant_biomarker_summary_Moderate.csv")
+
 library(dplyr)
 library(ggplot2)
 library(tidyr)
