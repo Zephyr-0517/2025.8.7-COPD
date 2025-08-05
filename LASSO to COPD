@@ -1,0 +1,320 @@
+library(dplyr)
+library(survival)
+library(glmnet)
+library(broom)
+library(readr)
+library(survminer)
+library(survAUC)
+library(doParallel)
+library(svglite)
+
+data_all <- read.csv("Final_Merged_Data.csv", header = TRUE, stringsAsFactors = FALSE)
+diff_proteins <- read.csv("smoke.csv")
+target_genes <- diff_proteins$X  
+
+
+data_clean <- data_all %>%
+  filter(baseline_C34 == "No", baseline_J43 == "No", baseline_J44 == "No") %>%
+  filter(followup_time_J44 > 0)
+
+set.seed(0630)
+train_idx <- sample(1:nrow(data_clean), size = 0.5 * nrow(data_clean))
+train_data <- data_clean[train_idx, ]
+test_data <- data_clean[-train_idx, ]
+
+train_ready <- train_data %>%
+  filter(if_all(all_of(target_genes), ~ !is.na(.))) %>%
+  mutate(smoking_level = factor(smoking_category_duration),
+         smoking_level = relevel(smoking_level, ref = "Never")) %>%
+  droplevels()
+
+x_train <- model.matrix(~ ., data = train_ready[, target_genes])[,-1]
+y_train <- Surv(train_ready$followup_time_J44, train_ready$event_J44)
+
+
+cl <- makeCluster(11)  
+registerDoParallel(cl)
+
+cvfit_pred <- cv.glmnet(x_train, y_train, family = "cox", alpha = 1, parallel = TRUE)
+
+stopCluster(cl)
+
+
+lambda_custom <- cvfit_pred$lambda.1se * 1
+
+
+coef_pred <- coef(cvfit_pred, s = lambda_custom)
+
+
+selected_pred <- rownames(coef_pred)[which(coef_pred != 0)]
+
+#coef_pred <- coef(cvfit_pred, s = "lambda.1se")
+#selected_pred <- rownames(coef_pred)[which(coef_pred != 0)]
+
+plot(cvfit_pred)
+
+svglite("lasso.svg", width = 8, height = 6)
+plot(cvfit_pred) 
+dev.off()
+
+
+train_ready <- train_ready %>%
+  mutate(
+    smoking_category_duration = factor(smoking_category_duration),
+    smoking_category_duration = relevel(smoking_category_duration, ref = "Never"),
+    quit_category = factor(quit_category),
+    quit_category = relevel(quit_category, ref = "Never")
+  )
+
+
+final_formula_pred <- as.formula(paste(
+    "Surv(followup_time_J44, event_J44) ~ ",
+  "BMI.x + sex + TDI + Recruitment_Age +",
+  paste(selected_pred, collapse = " + ")
+))
+model_pred <- coxph(final_formula_pred, data = train_ready)
+
+library(forestmodel)
+
+
+forest_plot <- forest_model(model_pred)
+
+
+print(forest_plot)
+svglite(".svg", width = 8, height = 6)
+plot(forest_plot) 
+dev.off()
+
+test_ready <- test_data %>%
+  filter(if_all(all_of(target_genes), ~ !is.na(.))) %>%
+  mutate(smoking_level = factor(smoking_category_duration),
+         smoking_level = relevel(smoking_level, ref = "Never")) %>%
+  droplevels()
+
+risk_score_test <- predict(model_pred, newdata = test_ready, type = "lp")
+test_ready$risk_score <- risk_score_test
+test_ready <- test_ready %>% filter(!is.na(risk_score))
+
+median_cut <- median(test_ready$risk_score)
+test_ready$risk_group <- ifelse(test_ready$risk_score >= median_cut, "High", "Low")
+test_ready$risk_group <- factor(test_ready$risk_group, levels = c("Low", "High"))
+
+fit_test <- survfit(Surv(followup_time_J44, event_J44) ~ risk_group, data = test_ready)
+ggsurvplot(
+  fit_test,
+  data = test_ready,
+  risk.table = TRUE,
+  pval = TRUE,
+  conf.int = TRUE,
+  censor = FALSE,
+  xlab = "Follow-up Time (days)",
+  ylab = "COPD-free Probability",
+  title = "Kaplan-Meier Curve by Risk Score (Test Set)",
+  legend.title = "Risk Group",
+  palette = c("#00BFC4", "#F8766D")
+)
+
+
+lp_test <- predict(model_pred, newdata = test_ready, type = "lp")
+Stime_test <- test_ready$followup_time_J44
+status_test <- test_ready$event_J44
+Surv.rsp_test <- Surv(Stime_test, status_test)
+
+time_points <- c(365, 1095, 1825,3650)  
+
+auc_uno_test <- AUC.uno(
+  Surv.rsp = Surv.rsp_test,
+  Surv.rsp.new = Surv.rsp_test,
+  lpnew = lp_test,
+  times = time_points
+)
+
+
+data.frame(
+  Time = paste0(auc_uno_test$times / 365, " Years"),
+  AUC = round(auc_uno_test$iauc, 3)
+)
+
+library(survminer)
+library(survival)
+
+fit_km <- survfit(Surv(followup_time_J44, event_J44) ~ risk_group, data = test_ready)
+
+p1<-ggsurvplot(
+  fit_km,
+  data = test_ready,
+  fun = "event",
+  risk.table = TRUE,       
+  pval = TRUE,            
+  conf.int = TRUE,         
+  xlab = "Follow-up Time (days)",
+  ylab = "Cumulative Incidence of COPD", 
+  title = "COPD Cumulative Incidence by Risk Group",
+  legend.title = "Risk Group",
+  palette = c("#00BFC4", "#F8766D")
+)
+
+svglite(".svg", width = 8, height = 6)
+print(p1) 
+dev.off()
+
+roc_obj <- roc(test_ready$event_J44, test_ready$risk_score, quiet = TRUE)
+auc_val <- auc(roc_obj)
+
+roc_df <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+p2<-ggplot(roc_df, aes(x = FPR, y = TPR)) +
+  geom_line(color = "#2C3E50", linewidth = 1.2) +  
+  geom_ribbon(aes(ymin = 0, ymax = TPR), fill = "#2C3E50", alpha = 0.3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  annotate("text", x = 0.6, y = 0.1, 
+           label = paste("AUC =", round(auc_val, 3)), 
+           size = 5, fontface = "italic") +
+  labs(
+    title = "Standard ROC Curve with AUC Shading",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  theme_minimal(base_size = 14)
+
+svglite(".svg", width = 8, height = 6)
+print(p2) 
+dev.off()
+
+library(broom)
+library(ggplot2)
+
+
+coef_df <- tidy(model_pred) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(abs_coef = abs(estimate)) %>%  
+  arrange(desc(abs_coef))               
+
+ggplot(coef_df, aes(x = reorder(term, abs_coef), y = abs_coef)) +
+  geom_col(fill = "#2C3E50") +
+  coord_flip() +
+  labs(
+    title = "Variable Contribution in Cox Model",
+    x = "Variable",
+    y = "Absolute Coefficient (|β|)"
+  ) +
+  theme_minimal(base_size = 14)
+
+library(svglite)
+
+svglite(".svg", width = 8, height = 6)
+ggplot(coef_df, aes(x = reorder(term, abs_coef), y = abs_coef)) +
+  geom_col(fill = "#2C3E50") +
+  coord_flip() +
+  labs(
+    title = "Variable Contribution in Cox Model",
+    x = "Variable",
+    y = "Absolute Coefficient (|β|)"
+  ) +
+  theme_minimal(base_size = 14)
+dev.off()
+
+library(pROC)
+library(ggplot2)
+library(svglite)
+
+
+test_ready$smoking_numeric <- factor(
+  test_ready$smoking_category_duration,
+  levels = c("Never", "Light", "Moderate", "Heavy"),
+  ordered = TRUE
+) %>% as.numeric()  
+
+df_roc <- test_ready %>%
+  filter(!is.na(smoking_numeric), !is.na(event_J44))
+
+roc_smoke <- roc(df_roc$event_J44, df_roc$smoking_numeric, quiet = TRUE)
+auc_smoke <- auc(roc_smoke)
+
+roc_df <- data.frame(
+  FPR = 1 - roc_smoke$specificities,
+  TPR = roc_smoke$sensitivities
+)
+
+p_smoke <- ggplot(roc_df, aes(x = FPR, y = TPR)) +
+  geom_line(color = "#E69F00", linewidth = 1.2) +
+  geom_ribbon(aes(ymin = 0, ymax = TPR), fill = "#E69F00", alpha = 0.3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  annotate("text", x = 0.6, y = 0.1,
+           label = paste("AUC =", round(auc_smoke, 3)),
+           size = 5, fontface = "italic") +
+  labs(
+    title = "ROC Curve: Smoking Level Predicting COPD",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  theme_minimal(base_size = 14)
+
+svglite("roc_smoking_category.svg", width = 8, height = 6)
+print(p_smoke)
+dev.off()
+
+full_ready <- data_clean %>%
+  filter(if_all(all_of(target_genes), ~ !is.na(.))) %>%
+  mutate(
+    smoking_level = factor(smoking_category_duration),
+    smoking_level = relevel(smoking_level, ref = "Never")
+  ) %>%
+  droplevels()
+
+full_ready$risk_score <- predict(model_pred, newdata = full_ready, type = "lp")
+
+heavy_only <- full_ready %>%
+  filter(smoking_category_duration == "Moderate")
+
+heavy_only <- heavy_only %>%
+  mutate(
+     heavy_group = case_when(
+      smoking_status == "Never" ~ "Never",
+      smoking_status == "Current" ~ "Current",
+      smoking_status == "Previous" & years_since_quit >= 0 & years_since_quit <= 2 ~ "Quit 0–2y",
+      smoking_status == "Previous" & years_since_quit >= 3 & years_since_quit <= 5 ~ "Quit 3–5y",
+      smoking_status == "Previous" & years_since_quit >= 6 & years_since_quit <= 8 ~ "Quit 6–8y",
+      smoking_status == "Previous" & years_since_quit >= 9 & years_since_quit <= 11 ~ "Quit 9-11y",
+      smoking_status == "Previous" & years_since_quit >= 12 & years_since_quit <= 14 ~ "Quit 12-14y",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(heavy_group))
+
+heavy_only$heavy_group <- factor(
+  heavy_only$heavy_group,
+  levels = c("Current", "Quit 0–2y", "Quit 3–5y", "Quit 6–8y", "Quit 9-11y", "Quit 12-14y")
+)
+
+library(ggplot2)
+
+library(ggplot2)
+
+ggplot(heavy_only, aes(x = heavy_group, y = risk_score, fill = heavy_group)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +  
+  geom_boxplot(width = 0.1, outlier.shape = NA, fill = "white", color = "black") + 
+  labs(
+    title = "Risk Score by Quitting Time in Heavy Smokers",
+    x = "Group",
+    y = "Predicted COPD Risk Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.line = element_line(color = "black"),          
+    axis.ticks = element_line(color = "black"),           
+    axis.text = element_text(color = "black"),            
+    axis.title = element_text(face = "bold", size = 13)   
+  )
+
+
+
+group1 <- heavy_only %>% filter(heavy_group == "Current") %>% pull(risk_score)
+group2 <- heavy_only %>% filter(heavy_group == "Quit 0–2y") %>% pull(risk_score)
+
+
+wilcox.test(group1, group2)
