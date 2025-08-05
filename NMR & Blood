@@ -1,3 +1,58 @@
+library(readr)
+library(dplyr)
+
+data <- read_tsv("clinial_metabolite_500K.tab")
+lookup <- read_csv("IDlist.csv")
+
+nmr_ids <- 23400:23648
+blood_count_ids <- c(
+  30000, 30010, 30020, 30030, 30040, 30050, 30060, 30070, 30080, 30090,
+  30100, 30110, 30120, 30130, 30140, 30150, 30160, 30170,
+  30250, 30260, 30270, 30280, 30300,
+  30180, 30190, 30200, 30210, 30220, 30230, 30240, 30290
+)
+biochem_ids <- c(
+  30600:30620, 30630:30650, 30660, 30670, 30680:30720,
+  30730:30750, 30760:30790, 30800:30820, 30830:30890
+)
+
+all_ids <- c(nmr_ids, blood_count_ids, biochem_ids)
+target_cols <- paste0("f.", all_ids, ".0.0")
+target_cols <- c("f.eid", target_cols)
+actual_cols <- intersect(target_cols, colnames(data))
+data_subset <- data[, actual_cols]
+
+extract_id <- function(x) as.integer(sub("f\\.(\\d+)\\.0\\.0", "\\1", x))
+ids_extracted <- sapply(actual_cols[-1], extract_id)
+
+names_extracted <- lookup$Name[match(ids_extracted, lookup$ID)]
+
+source_tag <- case_when(
+  ids_extracted %in% nmr_ids ~ "NMR",
+  ids_extracted %in% c(blood_count_ids, biochem_ids) ~ "Blood",
+  TRUE ~ "Other"
+)
+
+final_names <- paste0(names_extracted, "_", source_tag)
+
+colnames(data_subset) <- c("id", final_names)
+
+
+exclude_keywords <- c("assay", "aliquot", "correction", "missing", "reportability", 
+                      "freeze", "device", "route", "time", "well", "plate", "batch")
+
+clean_cols <- colnames(data_subset)[
+  !grepl(paste(exclude_keywords, collapse = "|"), colnames(data_subset), ignore.case = TRUE)
+]
+
+data_clean <- data_subset[, clean_cols]
+
+final_data <- read_csv("Final_Merged_Data.csv")
+
+merged_data <- final_data %>%
+  left_join(data_clean, by = "id")
+
+write_csv(merged_data, "data_with_blood.csv")
 
 library(dplyr)
 library(ggplot2)
