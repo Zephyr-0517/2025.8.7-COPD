@@ -1,0 +1,164 @@
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(readr)
+library(ggrepel)
+
+data_with_blood <- read.csv("data_with_blood.csv", header = TRUE, stringsAsFactors = FALSE)
+
+blood_check_cols <- grep("NMR|Blood", colnames(data_with_blood), value = TRUE)
+
+analyze_group <- function(data, category) {
+  data_grouped <- data %>%
+    select(id, smoking_category_duration, smoking_status, years_since_quit, all_of(blood_check_cols)) %>%
+    filter(!is.na(smoking_status)) %>%
+    mutate(group = case_when(
+      smoking_category_duration == category & smoking_status == "Previous" & years_since_quit <= 2 ~ "Quit_2y_or_less",
+      smoking_category_duration == category & smoking_status == "Current" ~ "Still_Smoking",
+      TRUE ~ NA_character_
+    )) %>%
+    filter(!is.na(group))
+  
+  calculate_p_value <- function(column_name) {
+    quit <- data_grouped[[column_name]][data_grouped$group == "Quit_2y_or_less"]
+    smoke <- data_grouped[[column_name]][data_grouped$group == "Still_Smoking"]
+    if (length(quit) < 3 || length(smoke) < 3) return(1)
+    shapiro1 <- shapiro.test(quit)
+    shapiro2 <- shapiro.test(smoke)
+    if (shapiro1$p.value > 0.05 & shapiro2$p.value > 0.05) {
+      return(t.test(as.formula(paste(column_name, "~ group")), data = data_grouped)$p.value)
+    } else {
+      return(wilcox.test(as.formula(paste(column_name, "~ group")), data = data_grouped)$p.value)
+    }
+  }
+  
+  pvals <- sapply(blood_check_cols, calculate_p_value)
+  pval_df <- data.frame(Biomarker = blood_check_cols, P_Value = pvals)
+  
+  summary_stats <- data_grouped %>%
+    select(group, all_of(blood_check_cols)) %>%
+    pivot_longer(cols = -group, names_to = "Biomarker", values_to = "Value") %>%
+    group_by(Biomarker, group) %>%
+    summarise(
+      Mean = mean(Value, na.rm = TRUE),
+      SD = sd(Value, na.rm = TRUE),
+      N = sum(!is.na(Value)),
+      .groups = "drop"
+    ) %>%
+    pivot_wider(names_from = group, values_from = c(Mean, SD, N), names_sep = "_") %>%
+    left_join(pval_df, by = "Biomarker") %>%
+    mutate(
+      Group = category,
+      logFC = log2((Mean_Quit_2y_or_less + 0.001) / (Mean_Still_Smoking + 0.001)),
+      Significant = ifelse(P_Value < 0.05, TRUE, FALSE)
+    )
+  return(summary_stats)
+}
+
+mod_result <- analyze_group(data_with_blood, "Moderate")
+heav_result <- analyze_group(data_with_blood, "Heavy")
+
+compare_df <- full_join(mod_result %>% select(Biomarker, logFC, Significant),
+                        heav_result %>% select(Biomarker, logFC, Significant),
+                        by = "Biomarker", suffix = c("_mod", "_heav"))
+
+compare_df <- compare_df %>%
+  mutate(
+    Quadrant = case_when(
+      logFC_mod > 0 & logFC_heav > 0 ~ "Quadrant 1 (↑↑)",
+      logFC_mod < 0 & logFC_heav < 0 ~ "Quadrant 4 (↓↓)",
+      logFC_mod > 0 & logFC_heav < 0 ~ "Quadrant 2 (↑↓)",
+      logFC_mod < 0 & logFC_heav > 0 ~ "Quadrant 3 (↓↑)",
+      TRUE ~ "Other"
+    ),
+    Fill = case_when(
+      Significant_mod & Significant_heav ~ "Both Sig",  # Both significant
+      Significant_mod & !Significant_heav ~ "Moderate Sig", # Only Moderate significant
+      !Significant_mod & Significant_heav ~ "Heavy Sig", # Only Heavy significant
+      TRUE ~ "NS"  # Not significant
+    )
+  )
+
+
+compare_df_NMR <- compare_df %>% filter(grepl("NMR$", Biomarker))
+compare_df_Blood <- compare_df %>% filter(grepl("Blood$", Biomarker))
+
+plot_df_NMR <- compare_df_NMR %>% filter(Fill != "NS")
+plot_df_Blood <- compare_df_Blood %>% filter(Fill != "NS")
+
+library(ggrepel) 
+
+p_nmr <- ggplot(plot_df_NMR, aes(x = logFC_heav, y = logFC_mod, color = Fill)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c(
+    "Both Sig" = "#66c2a5",
+    "Moderate Sig" = "#4a6ea9",
+    "Heavy Sig" = "#ffd92f"
+  )) +
+  geom_text_repel(
+    data = plot_df_NMR %>% filter(Biomarker %in% c(
+      "Glucose_NMR",
+      "Albumin_NMR",
+      "Total.Fatty.Acids_NMR"
+    )),
+    aes(x = logFC_heav, y = logFC_mod, label = Biomarker),
+    size = 3, color = "black", segment.color = "gray40", max.overlaps = Inf,
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "logFC Comparison: NMR biomarkers",
+    x = "Heavy Group log2 Fold Change",
+    y = "Moderate Group log2 Fold Change",
+    color = "Significance"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major = element_line(color = "gray90")
+  )
+
+p_blood <- ggplot(plot_df_Blood, aes(x = logFC_heav, y = logFC_mod, color = Fill)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c(
+    "Both Sig" = "#66c2a5",
+    "Moderate Sig" = "#4a6ea9",
+    "Heavy Sig" = "#ffd92f"
+  )) +
+  scale_x_continuous(limits = c(-0.4, 0.4), oob = scales::squish) +
+  scale_y_continuous(limits = c(-0.4, 0.4), oob = scales::squish) +
+  geom_text_repel(
+    data = plot_df_Blood %>% filter(Biomarker %in% c(
+      "Glucose_Blood",
+      "Neutrophill.count_Blood",
+      "HDL.cholesterol_Blood",
+      "IGF.1_Blood"
+    )),
+    aes(x = logFC_heav, y = logFC_mod, label = Biomarker),
+    size = 3, color = "black", segment.color = "gray40", max.overlaps = Inf,
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "logFC Comparison: Blood biomarkers",
+    x = "Heavy Group log2 Fold Change",
+    y = "Moderate Group log2 Fold Change",
+    color = "Significance"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major = element_line(color = "gray90")
+  )
+
+print(p_nmr)
+print(p_blood)
+
+write.csv(plot_df_NMR, "plot_df_NMR.csv", row.names = FALSE)
+write.csv(plot_df_Blood, "plot_df_Blood.csv", row.names = FALSE)
+
+ggsave("NMR_logFC_scatter_annotated.pdf", plot = p_nmr, width = 7, height = 6, device = cairo_pdf)
+
+ggsave("Blood_logFC_scatter_annotated.pdf", plot = p_blood, width = 7, height = 6, device = cairo_pdf)
