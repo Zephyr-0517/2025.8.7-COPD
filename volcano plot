@@ -1,0 +1,82 @@
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+df <- read.csv("mouse.csv", row.names = 1)
+df$Gene <- rownames(df)
+
+df <- df %>%
+  mutate(
+    logP_raw = -log10(adj.P.Val),
+    logP = ifelse(logP_raw > 300, 300, logP_raw),
+    regulation = case_when(
+      adj.P.Val < 0.05 & logFC > 0.1 ~ "Up",
+      adj.P.Val < 0.05 & logFC < -0.1 ~ "Down",
+      TRUE ~ "NoSig"
+    )
+  )
+
+red_palette <- colorRampPalette(c("#990000", "#FF9999"))(100)    
+blue_palette <- colorRampPalette(c("#3182bd", "#deebf7"))(100)   
+
+df_up <- df %>%
+  filter(regulation == "Up") %>%
+  arrange(adj.P.Val) %>%
+  mutate(color = red_palette[as.numeric(cut(rank(adj.P.Val), breaks = 100))])
+
+df_down <- df %>%
+  filter(regulation == "Down") %>%
+  arrange(adj.P.Val) %>%
+  mutate(color = blue_palette[as.numeric(cut(rank(adj.P.Val), breaks = 100))])
+
+df_nonsig <- df %>%
+  filter(regulation == "NoSig") %>%
+  mutate(color = "grey70")
+
+df <- bind_rows(df_up, df_down, df_nonsig)
+
+df$regulation_factor <- factor(df$regulation, levels = c("Up", "Down", "NoSig"))
+
+#top_up <- df %>% filter(regulation == "Up") %>% arrange(adj.P.Val) %>% slice(1:5)
+#top_down <- df %>% filter(regulation == "Down") %>% arrange(adj.P.Val) %>% slice(1:5)
+#top20 <- bind_rows(top_up, top_down)
+
+label_df <- df %>% filter(Gene %in% filtered_genes)
+
+p1<-ggplot(df, aes(x = logFC, y = logP)) +
+  geom_point(aes(color = regulation_factor, fill = color), size = 1.5, shape = 21, alpha = 0.9) +
+  scale_color_manual(values = c("Up" = "red", "Down" = "blue", "NoSig" = "grey50")) +
+  scale_fill_identity() +
+  geom_vline(xintercept = c(-0.1, 0.1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "solid") +
+  geom_text_repel(
+  data = label_df,
+  aes(label = Gene),
+  size = 3.2,
+  max.overlaps = Inf,    
+  box.padding = 0.5,
+  point.padding = 0.3,
+  segment.color = "black",  
+  segment.size = 0.4,       
+  min.segment.length = 0   
+) +
+  labs(title = "Volcano Plot: smoke.csv",
+       x = "log2 Fold Change",
+       y = "-log10 Adjusted P-value",
+       color = "Regulation") +
+  coord_cartesian(ylim = c(0, 3)) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.ticks = element_line(color = "black", linewidth = 0.3),
+    axis.ticks.length = unit(3, "pt")  
+  )
+
+svg(".svg", width = 7, height = 7)
+plot(p1)
+dev.off()
+
+sigup <- df %>% filter(regulation == "Up")
+sigdown <- df %>% filter(regulation == "Down")
+write.csv(sigup, "sigup.csv", row.names = FALSE)
+write.csv(sigdown, "sigdown.csv", row.names = FALSE)
