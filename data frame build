@@ -1,0 +1,300 @@
+#deal with olink data 
+library(dplyr)
+library(impute)
+data <- read.csv("Olink2923.csv", header = TRUE, stringsAsFactors = FALSE)
+rownames(data) <- data[[1]]
+data <- data[, -1]
+colnames(data) <- sapply(colnames(data), function(x) {
+  strsplit(x, "\\.")[[1]][1]
+})
+protein_missing <- apply(data, 2, function(x) mean(is.na(x)))
+participant_missing <- apply(data, 1, function(x) mean(is.na(x)))
+
+protein_threshold <- 0.3
+participant_threshold <- 0.3
+
+data_filtered <- data[, protein_missing <= protein_threshold]
+
+data_filtered <- data_filtered[participant_missing[rownames(data)] <= participant_threshold, ]
+
+data_matrix <- as.matrix(data_filtered)
+
+data_imputed <- t(impute.knn(t(data_matrix), k = 5)$data)
+
+#merge data build
+library(dplyr)
+library(lubridate)
+library(readr)
+death_data    <- read.csv("death.csv",   header = TRUE, stringsAsFactors = FALSE)
+base_data     <- read.csv("base.csv",    header = TRUE, stringsAsFactors = FALSE)
+smoking_data  <- read.csv("data_smoking_participant.csv",
+                          header = TRUE, stringsAsFactors = FALSE)
+merged_data   <- read.table("merged_data.tab",
+                            header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+protein_data  <- read.csv("New_Olink.csv",
+                          header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+c34_data      <- read.csv("C34.csv", header = TRUE, stringsAsFactors = FALSE)
+j43_data      <- read.csv("J43.csv", header = TRUE, stringsAsFactors = FALSE)
+
+
+base_proc <- base_data %>%
+  mutate(
+    age.at.recruitment = as.numeric(age.at.recruitment),
+    year.of.brith      = as.numeric(year.of.brith),
+    Recruitment_Age    = age.at.recruitment,
+    recruitment_year   = year.of.brith + age.at.recruitment,
+    recruitment_date   = as.Date(paste0(recruitment_year, "-07-01")),
+    date_lost          = as.Date(Date.lost.to.follow.up, format = "%Y/%m/%d"),
+    id                 = as.character(eid)
+  )
+
+death_proc <- death_data %>%
+  mutate(
+    date_death = as.Date(date_of_death, format = "%Y-%m-%d"),
+    id         = as.character(participant.eid)
+  ) %>%
+  select(id, date_death)
+
+
+merged_proc <- merged_data %>%
+  mutate(
+    COPD_date   = as.Date(`Date.J44.first.reported..other.chronic.obstructive.pulmonary.disease.`,
+                          format = "%Y/%m/%d"),
+    id          = as.character(Participant.ID),
+    TDI         = as.numeric(Townsend.deprivation.index.at.recruitment),
+    BMI         = as.numeric(Body.mass.index..BMI....Instance.0),
+    Current_Age = as.numeric(Age)
+  ) %>%
+  select(id, COPD_date, TDI, BMI, Sex, Current_Age)
+
+
+smoking_proc <- smoking_data %>%
+  mutate(
+    id                = as.character(Participant.ID),
+    smoking_status    = trimws(Smoking.status...Instance.0),
+    age_start_current = suppressWarnings(parse_number(
+      Age.started.smoking.in.current.smokers...Instance.0)),
+    age_start_former  = suppressWarnings(parse_number(
+      Age.started.smoking.in.former.smokers...Instance.0)),
+    age_stop_former   = suppressWarnings(parse_number(
+      Age.stopped.smoking...Instance.0))  
+  ) %>%
+  select(id, smoking_status, age_start_current, age_start_former, age_stop_former)
+
+
+
+protein_df <- protein_data %>%
+  mutate(id = rownames(protein_data))
+
+
+c34_data <- c34_data %>%
+  mutate(
+    id       = as.character(eid),
+    C34_age  = as.numeric(`date.C34`)    
+  ) %>%
+  select(id, C34_age)
+
+j43_data <- j43_data %>%
+  mutate(
+    id      = as.character(`Participant.ID`),
+    J43_date = as.Date(`date.J43`, format = "%Y/%m/%d")
+  ) %>%
+  select(id, J43_date)
+
+protein_ids  <- protein_df$id
+base_proc    <- base_proc    %>% filter(id %in% protein_ids)
+death_proc   <- death_proc   %>% filter(id %in% protein_ids)
+merged_proc  <- merged_proc  %>% filter(id %in% protein_ids)
+smoking_proc <- smoking_proc %>% filter(id %in% protein_ids)
+c34_data     <- c34_data     %>% filter(id %in% protein_ids)
+j43_data     <- j43_data     %>% filter(id %in% protein_ids)
+protein_df   <- protein_df   %>% filter(id %in% protein_ids)
+
+lock_date <- as.Date("2024-12-31")
+
+followup_J44 <- base_proc %>%
+  left_join(death_proc,   by = "id") %>%
+  left_join(merged_proc %>% select(id, COPD_date), by = "id") %>%
+  rowwise() %>%
+  mutate(
+    censor_date_J44    = min(c(date_death, date_lost, lock_date), na.rm = TRUE),
+    event_date_J44     = if (!is.na(COPD_date) && COPD_date >= recruitment_date)
+      COPD_date else censor_date_J44,
+    event_J44          = as.integer(!is.na(COPD_date) && COPD_date >= recruitment_date),
+    followup_time_J44  = as.numeric(event_date_J44 - recruitment_date)
+  ) %>%
+  ungroup() %>%
+  select(id, event_J44, followup_time_J44)
+
+followup_C34 <- base_proc %>%
+  left_join(death_proc, by = "id") %>%
+  left_join(c34_data,   by = "id") %>%
+  rowwise() %>%
+  mutate(
+    censor_date_C34    = min(c(date_death, date_lost, lock_date), na.rm = TRUE),
+    event_date_C34     = if (!is.na(C34_age) && C34_age >= Recruitment_Age)
+      recruitment_date + days(round((C34_age - Recruitment_Age) * 365)) 
+    else censor_date_C34,
+    event_C34          = as.integer(!is.na(C34_age) && C34_age >= Recruitment_Age),
+    followup_time_C34  = as.numeric(event_date_C34 - recruitment_date)
+  ) %>%
+  ungroup() %>%
+  select(id, event_C34, followup_time_C34)
+
+followup_J43 <- base_proc %>%
+  left_join(death_proc, by = "id") %>%
+  left_join(j43_data,   by = "id") %>%
+  rowwise() %>%
+  mutate(
+    censor_date_J43    = min(c(date_death, date_lost, lock_date), na.rm = TRUE),
+    event_date_J43     = if (!is.na(J43_date) && J43_date >= recruitment_date)
+      J43_date else censor_date_J43,
+    event_J43          = as.integer(!is.na(J43_date) && J43_date >= recruitment_date),
+    followup_time_J43  = as.numeric(event_date_J43 - recruitment_date)
+  ) %>%
+  ungroup() %>%
+  select(id, event_J43, followup_time_J43)
+
+baseline_J44 <- base_proc %>%
+  left_join(merged_proc %>% select(id, COPD_date), by = "id") %>%
+  mutate(
+    baseline_J44 = ifelse(
+      !is.na(COPD_date) & COPD_date <= recruitment_date,
+      "Yes", 
+      "No"
+    )
+  ) %>%
+  select(id, baseline_J44)
+
+baseline_C34 <- base_proc %>%
+  left_join(c34_data, by = "id") %>%
+  mutate(
+    baseline_C34 = ifelse(
+      !is.na(C34_age) & C34_age <= Recruitment_Age,
+      "Yes",
+      "No"
+    )
+  ) %>%
+  select(id, baseline_C34)
+
+baseline_J43 <- base_proc %>%
+  left_join(j43_data, by = "id") %>%
+  mutate(
+    baseline_J43 = ifelse(
+      !is.na(J43_date) & J43_date <= recruitment_date,
+      "Yes",
+      "No"
+    )
+  ) %>%
+  select(id, baseline_J43)
+
+demog_df <- base_proc %>%
+  select(id, sex) %>%
+  left_join(merged_proc %>% select(id, Current_Age, TDI,BMI), by = "id")
+
+baseline_df <- base_proc %>%
+  select(id, recruitment_date, Recruitment_Age) %>%
+  left_join(demog_df %>% select(id, BMI), by = "id") %>%
+  left_join(baseline_J44, by = "id") %>%
+  left_join(baseline_C34, by = "id") %>%
+  left_join(baseline_J43, by = "id")
+
+followup_C34 <- followup_C34 %>%
+  arrange(id, followup_time_C34) %>%
+  distinct(id, .keep_all = TRUE)
+
+followup_J43 <- followup_J43 %>%
+  arrange(id, followup_time_J43) %>%
+  distinct(id, .keep_all = TRUE)
+
+followup_J44 <- followup_J44 %>%
+  arrange(id, followup_time_J44) %>%
+  distinct(id, .keep_all = TRUE)
+
+followup_df <- followup_J44 %>%
+  left_join(followup_C34, by = "id") %>%
+  left_join(followup_J43, by = "id")
+
+merged_all <- Reduce(function(x, y) merge(x, y, by = "id", all = TRUE),
+                     list(baseline_df,
+                          followup_df,
+                          demog_df,
+                          smoking_proc,
+                          protein_df))
+
+merged_all <- merged_all %>%
+  # 只保留 Current / Previous / Never
+  filter(smoking_status %in% c("Current", "Never", "Previous")) %>%
+  
+  mutate(
+    smoking_duration = case_when(
+      smoking_status == "Never" ~ 0,
+      smoking_status == "Previous" ~ age_stop_former - age_start_former,
+      smoking_status == "Current" ~ Recruitment_Age - age_start_current,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  
+  filter(!is.na(smoking_duration)) %>%
+
+  mutate(
+    smoking_duration = ifelse(smoking_duration == 0, NA, smoking_duration)
+  )
+
+
+mean_smoking_duration <- mean(merged_all$smoking_duration, na.rm = TRUE)
+sd_smoking_duration   <- sd(merged_all$smoking_duration, na.rm = TRUE)
+
+merged_all <- merged_all %>%
+  mutate(
+    smoking_duration_std = (smoking_duration - mean_smoking_duration) / sd_smoking_duration
+  )
+
+mean_quit <- mean(merged_all$years_since_quit, na.rm = TRUE)
+sd_quit   <- sd(merged_all$years_since_quit, na.rm = TRUE)
+
+merged_all <- merged_all %>%
+  mutate(
+    years_since_quit = case_when(
+      smoking_status == "Previous" ~ Recruitment_Age - age_stop_former,
+      TRUE ~ NA_real_
+    )
+  )
+
+
+mean_quit <- mean(merged_all$years_since_quit, na.rm = TRUE)
+sd_quit   <- sd(merged_all$years_since_quit, na.rm = TRUE)
+
+
+merged_all <- merged_all %>%
+  mutate(
+    years_since_quit_std = (years_since_quit - mean_quit) / sd_quit
+  )
+merged_all <- merged_all %>%
+  mutate(
+    quit_category = case_when(
+      smoking_status == "Never" ~ "Never",
+      smoking_status == "Current" ~ "Current",
+      smoking_status == "Previous" & years_since_quit < 10 ~ "Former <10y",
+      smoking_status == "Previous" & years_since_quit >= 10 ~ "Former ≥10y",
+      TRUE ~ NA_character_
+    ),
+    quit_category = factor(quit_category, levels = c("Never", "Former ≥10y", "Former <10y", "Current"))
+  )
+merged_all <- merged_all %>%
+  mutate(
+    smoking_category_duration = case_when(
+      is.na(smoking_duration) ~ "Never",                        
+      smoking_duration < 15 ~ "Light",
+      smoking_duration >= 15 & smoking_duration < 30 ~ "Moderate",
+      smoking_duration >= 30 ~ "Heavy",
+      TRUE ~ "Unknown"
+    ),
+    smoking_category_duration = factor(
+      smoking_category_duration,
+      levels = c("Never", "Light", "Moderate", "Heavy")
+    )
+  )
+
+
+
