@@ -295,6 +295,53 @@ merged_all <- merged_all %>%
       levels = c("Never", "Light", "Moderate", "Heavy")
     )
   )
+write.csv(merged_all, "Final_Merged_Data.csv", row.names = FALSE)
 
+#limma
+library(dplyr)
+library(limma)
+library(readr)
+
+data <- read.csv("Final_Merged_Data.csv", header = TRUE, stringsAsFactors = FALSE)
+
+
+current_heavy <- data %>%
+  filter(smoking_status == "Current",
+         smoking_category_duration == "Heavy",
+         baseline_C34 == "No", baseline_J44 == "No", baseline_J43 == "No") %>%
+  mutate(group = "Current_Heavy")
+
+never_smokers <- data %>%
+  filter(smoking_status == "Never",
+         baseline_C34 == "No", baseline_J44 == "No", baseline_J43 == "No") %>%
+  mutate(group = "Never")
+
+group_data <- bind_rows(current_heavy, never_smokers)
+
+protein_data <- group_data %>%
+  dplyr::select(id, A1BG:ZPR1) 
+
+protein_data <- protein_data %>%
+  mutate(across(where(is.character), as.numeric))
+
+phenotype <- group_data %>%
+  dplyr::select(id, group) %>%
+  mutate(group = factor(group, levels = c("Never", "Current_Heavy")))
+
+data_merged <- merge(protein_data, phenotype, by = "id")
+
+expr_matrix <- as.matrix(data_merged[, -c(1, ncol(data_merged))])  # 去除 id 和 group 列
+expr_matrix <- t(expr_matrix)  
+
+group <- data_merged$group
+design <- model.matrix(~ group)
+
+fit <- lmFit(expr_matrix, design)
+fit <- eBayes(fit)
+
+results <- topTable(fit, coef = "groupCurrent_Heavy", adjust = "fdr", number = Inf)
+significant_proteins <- results %>% filter(adj.P.Val < 0.05)
+
+write.csv(significant_proteins, "smoke.csv", row.names = TRUE)
 
 
