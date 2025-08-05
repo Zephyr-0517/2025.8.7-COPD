@@ -1,0 +1,120 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.neural_network import MLPRegressor
+
+data = pd.read_csv(r"C:\Users\Ma\Desktop\smoke&COPD\Final_Merged_Data.csv")
+
+if 'smoking_category_duration' in data.columns:
+    data.rename(columns={'smoking_category_duration': 'smoking_category'}, inplace=True)
+
+data['years_since_quit'] = data['years_since_quit'].fillna(0)
+
+data_clean = data[
+    (data['baseline_J44'] == 'No') &
+    (data['baseline_J43'] == 'No') &
+    (data['baseline_C34'] == 'No') &
+    (data['followup_time_J44'] > 0) &
+    (data['smoking_status'] != 'Never')
+].dropna(subset=['smoking_duration','BMI.x','TDI'])
+
+
+data_clean['smoking_status'] = data_clean['smoking_status'].astype('category')
+data_clean['smoking_category'] = data_clean['smoking_category'].astype('category')
+
+smokers = data_clean[data_clean['smoking_status'] == 'Current'].copy().reset_index(drop=True)
+quitters = data_clean[data_clean['smoking_status'] == 'Previous'].copy().reset_index(drop=True)
+
+
+smokers['id'] = smokers['id']
+quitters['id'] = quitters['id']
+smokers = pd.get_dummies(smokers, columns=['smoking_status', 'smoking_category'], drop_first=False)
+quitters = pd.get_dummies(quitters, columns=['smoking_status', 'smoking_category'], drop_first=False)
+
+proteins = ["ALPP", "CXCL17", "WFDC2", "MMP12", "GDF15", "SCGB1A1", "TNR", "BCAN", "REN", "EGFR", "AGER"]
+features = ['years_since_quit', 'smoking_duration', 'Recruitment_Age', 'BMI.x', 'TDI']
+
+X_smokers = smokers[features]
+y_smokers = smokers[proteins]
+X_quitters = quitters[features]
+y_quitters = quitters[proteins]
+
+
+scaler = StandardScaler()
+X_smokers_scaled = scaler.fit_transform(X_smokers)
+X_quitters_scaled = scaler.transform(X_quitters)
+
+def train_mlp(X, y):
+    model = MLPRegressor(
+        hidden_layer_sizes=(128, 64, 32),
+        max_iter=1000,
+        random_state=123,
+        activation='relu',
+        solver='adam',
+        learning_rate_init=0.0001,
+        early_stopping=True,
+        n_iter_no_change=100,
+        validation_fraction=0.3
+    )
+    model.fit(X, y)
+    return model
+
+mlp_models_smokers = {protein: train_mlp(X_smokers_scaled, y_smokers[protein]) for protein in proteins}
+mlp_models_quitters = {protein: train_mlp(X_quitters_scaled, y_quitters[protein]) for protein in proteins}
+
+
+years = np.arange(0, 16)
+
+sim_continue = pd.concat([
+    smokers.assign(
+        timepoint=year,
+        smoking_duration=smokers['smoking_duration'] + year,
+        Recruitment_Age=smokers['Recruitment_Age'] + year,
+        years_since_quit=smokers['years_since_quit'],
+        id=smokers['id']
+    )
+    for year in years
+], ignore_index=True)
+
+sim_quit = pd.concat([
+    smokers.assign(
+        timepoint=year,
+        years_since_quit=smokers['years_since_quit'] + year,
+        Recruitment_Age=smokers['Recruitment_Age'] + year,
+        smoking_duration=smokers['smoking_duration'],
+        id=smokers['id']
+    )
+    for year in years
+], ignore_index=True)
+
+
+sim_continue_scaled = scaler.transform(sim_continue[features])
+sim_quit_scaled = scaler.transform(sim_quit[features])
+
+for protein in proteins:
+    sim_continue[protein] = mlp_models_smokers[protein].predict(sim_continue_scaled)
+    sim_quit[protein] = mlp_models_quitters[protein].predict(sim_quit_scaled)
+
+
+
+baseline_duration = sim_continue.query("timepoint == 0")[['id', 'smoking_duration']].copy()
+
+def classify_smoking_intensity(duration):
+    if duration <= 15:
+        return 'Light'
+    elif duration <= 30:
+        return 'Moderate'
+    else:
+        return 'Heavy'
+baseline_duration['smoking_category'] = baseline_duration['smoking_duration'].apply(classify_smoking_intensity)
+sim_continue = sim_continue.merge(baseline_duration[['id', 'smoking_category']], on='id', how='left')
+sim_quit = sim_quit.merge(baseline_duration[['id', 'smoking_category']], on='id', how='left')
+
+
+output_columns = ['id', 'timepoint', 'smoking_duration', 'years_since_quit', 'Recruitment_Age',
+                  'BMI.x', 'TDI', 'smoking_category'] + proteins  # proteins 是11个蛋白列表
+
+sim_continue = sim_continue[output_columns]
+sim_quit = sim_quit[output_columns]
+sim_continue.to_csv(r'C:\Users\Ma\Desktop\smoke&COPD\sim_smokers_continue_id.csv', index=False)
+sim_quit.to_csv(r'C:\Users\Ma\Desktop\smoke&COPD\sim_smokers_quit_id.csv', index=False)
