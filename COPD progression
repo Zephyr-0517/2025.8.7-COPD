@@ -1,0 +1,143 @@
+
+library(dplyr)
+library(survival)
+library(glmnet)
+library(tibble)
+
+merged_all <- read.csv("Final_Merged_Data.csv", stringsAsFactors = FALSE)
+
+copd_data <- merged_all %>%
+  filter(baseline_J44 == "Yes", baseline_J43 == "No", baseline_C34 == "No")
+
+protein_data <- copd_data %>%
+  dplyr::select(id, A1BG:ZPR1)
+
+surv_data <- copd_data %>%
+  dplyr::select(id, followup_time_C34, event_C34)
+
+merged_for_lasso <- inner_join(protein_data, surv_data, by = "id")
+
+protein_cols <- colnames(merged_for_lasso)[!(colnames(merged_for_lasso) %in% c("id", "followup_time_C34", "event_C34"))]
+
+univ_results <- lapply(protein_cols, function(protein) {
+  formula <- as.formula(paste("Surv(followup_time_C34, event_C34) ~", protein))
+  fit <- tryCatch(coxph(formula, data = merged_for_lasso), error = function(e) NULL)
+  if (!is.null(fit)) {
+    summary_fit <- summary(fit)
+    tibble(
+      protein = protein,
+      HR = exp(coef(fit)),
+      p = summary_fit$coefficients[,"Pr(>|z|)"]
+    )
+  }
+})
+univ_df <- bind_rows(univ_results)
+sig_proteins <- univ_df %>% filter(p < 0.005) %>% pull(protein)
+
+
+X <- as.matrix(merged_for_lasso[, sig_proteins])
+y <- Surv(merged_for_lasso$followup_time_C34, merged_for_lasso$event_C34)
+valid_idx <- complete.cases(X) & merged_for_lasso$followup_time_C34 > 0
+
+complete_idx <- complete.cases(X)
+X_clean <- X[complete_idx, ]
+y_clean <- y[complete_idx]
+X_clean <- X[valid_idx, ]
+y_clean <- Surv(merged_for_lasso$followup_time_C34[valid_idx],
+                merged_for_lasso$event_C34[valid_idx])
+
+set.seed(0630)
+cvfit <- cv.glmnet(X_clean, y_clean, family = "cox", alpha = 1)
+
+plot(cvfit)
+
+coef_1se <- coef(cvfit, s = "lambda.1se")
+selected_idx <- which(coef_1se != 0)
+selected_proteins <- rownames(coef_1se)[selected_idx]
+
+
+
+
+
+
+
+final_df <- copd_data %>%
+  filter(id %in% merged_for_lasso$id[valid_idx]) %>%
+  dplyr::select(id, followup_time_C34, event_C34,
+         sex, TDI, BMI.x, smoking_duration_std, years_since_quit_std,
+         all_of(selected_proteins)) 
+
+multi_formula <- as.formula(
+  paste("Surv(followup_time_C34, event_C34) ~",
+        paste(c(selected_proteins,
+                "sex", "TDI", "BMI.x", "smoking_duration_std","years_since_quit_std"),
+              collapse = " + "))
+)
+
+
+multi_model <- coxph(multi_formula, data = final_df)
+summary_multi <- summary(multi_model)
+
+multi_results <- data.frame(
+  Variable = rownames(summary_multi$coefficients),
+  HR = round(exp(summary_multi$coefficients[,"coef"]), 3),
+  Lower95 = round(summary_multi$conf.int[, "lower .95"], 3),
+  Upper95 = round(summary_multi$conf.int[, "upper .95"], 3),
+  P_value = signif(summary_multi$coefficients[,"Pr(>|z|)"], 3)
+)
+
+
+
+write.csv(multi_results, "C34process.csv", row.names = FALSE)
+
+
+
+
+library(forestmodel)
+
+# 使用 final_df 和 multi_model 绘制
+forest_plot <- forest_model(multi_model)
+
+
+print(forest_plot)
+library(svglite)
+
+svglite(".svg", width = 8, height = 6)
+print(forest_plot)
+dev.off()
+
+
+library(survival)
+library(survminer)
+library(ggplot2)
+library(svglite)
+
+
+for (protein in selected_proteins) {
+
+  final_df$protein_group <- ifelse(final_df[[protein]] >= median(final_df[[protein]], na.rm = TRUE),
+                                   "High", "Low")
+
+  surv_object <- Surv(final_df$followup_time_C34, final_df$event_C34)
+
+  fit <- survfit(surv_object ~ protein_group, data = final_df)
+
+  km_plot <- ggsurvplot(
+    fit,
+    data = final_df,
+    fun = "event",             
+    risk.table = TRUE,
+    pval = TRUE,
+    conf.int = TRUE,
+    palette = c("High" = "#EB746A", "Low" = "#3376A8"), 
+    censor = TRUE,
+    legend.title = protein,
+    legend.labs = c("High", "Low"),
+    xlab = "Follow-up Time (Years)",
+    ylab = "Cumulative Incidence Rate",
+    surv.median.line = "hv"
+  )
+
+  ggsave(filename = paste0("Cumulative_Incidence_", protein, ".svg"),
+         plot = km_plot$plot,
+         width = 8, height = 6)
