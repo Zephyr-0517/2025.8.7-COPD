@@ -1,0 +1,83 @@
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+
+expr_df <- read.csv("fig5.csv", stringsAsFactors = FALSE)
+
+colnames(expr_df)[colnames(expr_df) == "Quit..10y"] <- "Quit <10y"
+colnames(expr_df)[colnames(expr_df) == "Quit..10y.1"] <- "Quit ≥10y"
+
+group1_genes <- c("AGER", "SCGB1A1", "REN")
+group2_genes <- c("BCAN", "CXCL17", "TNR", "ALPP")
+group3_genes <- c("EGFR", "GDF15", "MMP12", "WFDC2")
+
+long_df <- expr_df %>%
+  pivot_longer(cols = -Gene, names_to = "Group", values_to = "Expression")
+
+long_df$Group <- factor(long_df$Group, levels = c("Current", "Quit <10y", "Quit ≥10y", "Never"))
+
+filtered_df_group1 <- long_df %>% filter(Gene %in% group1_genes)
+filtered_df_group2 <- long_df %>% filter(Gene %in% group2_genes)
+filtered_df_group3 <- long_df %>% filter(Gene %in% group3_genes)
+
+color_group1 <- c("AGER" = "#E41A1C", "SCGB1A1" = "#377EB8", "REN" = "#4DAF4A")
+color_group2 <- c("BCAN" = "#FF7F00", "CXCL17" = "#F781BF", "TNR" = "#FFB6C1", "ALPP" = "#A6A6A6")
+color_group3 <- c("EGFR" = "#32CD32", "GDF15" = "#FFD700", "MMP12" = "#FF6347", "WFDC2" = "#D2C2F2")
+
+# Group 1
+p1 <- ggplot(filtered_df_group1, aes(x = Group, y = Expression, group = Gene, color = Gene)) +
+  geom_line() +
+  geom_point(size = 2, alpha = 0.7) +
+  scale_color_manual(values = color_group1) +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "Expression of AGER, SCGB1A1, and REN",
+    x = "Group", 
+    y = "Expression Level"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  )
+
+# Group 2
+p2 <- ggplot(filtered_df_group2, aes(x = Group, y = Expression, group = Gene, color = Gene)) +
+  geom_line() +
+  geom_point(size = 2, alpha = 0.7) +
+  scale_color_manual(values = color_group2) +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "Expression of BCAN, CXCL17, TNR, and ALPP",
+    x = "Group", 
+    y = "Expression Level"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  )
+
+# Group 3
+p3 <- ggplot(filtered_df_group3, aes(x = Group, y = Expression, group = Gene, color = Gene)) +
+  geom_line() +
+  geom_point(size = 2, alpha = 0.7) +
+  scale_color_manual(values = color_group3) +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "Expression of EGFR, GDF15, MMP12, and WFDC2",
+    x = "Group", 
+    y = "Expression Level"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  )
+
+
+print(p1)
+print(p2)
+print(p3)
+
+ggsave("Group1_Expression_Lines.svg", p1, width = 8, height = 6)
+ggsave("Group2_Expression_Lines.svg", p2, width = 8, height = 6)
+ggsave("Group3_Expression_Lines.svg", p3, width = 8, height = 6)
