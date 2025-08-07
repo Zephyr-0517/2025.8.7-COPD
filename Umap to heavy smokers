@@ -27,9 +27,17 @@ data <- read.csv("Final_Merged_Data.csv", header = TRUE, stringsAsFactors = FALS
 data <- data %>%
   filter(baseline_J44 == "No", baseline_J43 == "No", baseline_C34 == "No")
 
+
 smoker_data <- data %>%
-  filter(smoking_category_duration %in% c("Heavy")) %>%
-  filter(smoking_status %in% c("Current")) 
+filter(smoking_category_duration %in% c("Heavy"))%>%
+  dplyr::filter(
+    followup_time_J44 > 0,
+    smoking_status != "Never",
+    smoking_status != "Previous"
+  ) %>%
+  dplyr::filter(!is.na(smoking_duration), !is.na(BMI.x), !is.na(TDI))
+
+
 
 
 protein_data <- smoker_data %>%
